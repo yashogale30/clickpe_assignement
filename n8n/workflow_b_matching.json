@@ -1,0 +1,295 @@
+{
+  "name": "Workflow B - User-Loan Matching",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "loan_match",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-wb-webhook",
+      "name": "Loan match webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ],
+      "webhookId": "loan-match-webhook-id"
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "batch_id",
+              "value": "={{ $json.body.batch_id }}"
+            }
+          ],
+          "number": [
+            {
+              "name": "tolerance",
+              "value": "={{ $json.body.tolerance ?? 0.05 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-wb-normalize",
+      "name": "Normalize request",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE batches\nSET status = 'matching'\nWHERE batch_id = $1::uuid\n  AND status IN ('parsed', 'matching')\nRETURNING batch_id, status;",
+        "options": {
+          "queryReplacement": "={{ [$json.batch_id] }}"
+        }
+      },
+      "id": "node-wb-mark-matching",
+      "name": "Mark batch matching",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        640,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ !!$json.batch_id }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-wb-if-valid",
+      "name": "Batch exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        860,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH\ninput AS (\n  SELECT $1::uuid AS batch_id, GREATEST(0::numeric, $2::numeric) AS tolerance\n),\ncandidate_pairs AS (\n  SELECT\n    u.user_id, u.email, u.monthly_income, u.credit_score,\n    u.employment_status, u.age, u.batch_id,\n    p.product_id, p.product_name, p.source_site,\n    p.min_income, p.min_score, p.max_score, p.min_age, p.max_age,\n    p.allowed_employment, i.tolerance\n  FROM users u\n  JOIN loan_products p ON p.is_active\n  CROSS JOIN input i\n  WHERE u.batch_id = i.batch_id\n),\nscored AS (\n  SELECT c.*,\n    CASE WHEN c.min_income IS NULL THEN TRUE\n         ELSE c.monthly_income >= c.min_income END AS income_ok,\n    CASE WHEN c.min_score IS NULL THEN TRUE\n         ELSE c.credit_score >= c.min_score END AS min_score_ok,\n    CASE WHEN c.max_score IS NULL THEN TRUE\n         ELSE c.credit_score <= c.max_score END AS max_score_ok,\n    CASE WHEN c.min_age IS NULL THEN TRUE\n         ELSE c.age >= c.min_age END AS min_age_ok,\n    CASE WHEN c.max_age IS NULL THEN TRUE\n         ELSE c.age <= c.max_age END AS max_age_ok,\n    CASE WHEN c.allowed_employment IS NULL THEN TRUE\n         ELSE c.employment_status = ANY(c.allowed_employment) END AS employment_ok,\n    LEAST(\n      COALESCE((c.monthly_income - c.min_income) /\n        NULLIF(GREATEST(ABS(c.min_income), 1), 0), 1),\n      COALESCE((c.credit_score - c.min_score)::numeric /\n        NULLIF(GREATEST(ABS(c.min_score), 1), 0), 1),\n      COALESCE((c.max_score - c.credit_score)::numeric /\n        NULLIF(GREATEST(ABS(c.max_score), 1), 0), 1),\n      COALESCE((c.age - c.min_age)::numeric /\n        NULLIF(GREATEST(ABS(c.min_age), 1), 0), 1),\n      COALESCE((c.max_age - c.age)::numeric /\n        NULLIF(GREATEST(ABS(c.max_age), 1), 0), 1)\n    ) AS normalized_margin\n  FROM candidate_pairs c\n),\nclassified AS (\n  SELECT s.*,\n    (s.income_ok AND s.min_score_ok AND s.max_score_ok AND\n     s.min_age_ok AND s.max_age_ok AND s.employment_ok) AS is_match,\n    (NOT s.income_ok)::int + (NOT s.min_score_ok)::int +\n    (NOT s.max_score_ok)::int + (NOT s.min_age_ok)::int +\n    (NOT s.max_age_ok)::int + (NOT s.employment_ok)::int AS failed_criteria,\n    (CASE WHEN s.income_ok THEN 0 ELSE\n       GREATEST(s.min_income - s.monthly_income, 0) /\n       GREATEST(ABS(COALESCE(s.min_income, 1)), 1) END) AS income_deficit,\n    (CASE WHEN s.min_score_ok THEN 0 ELSE\n       GREATEST(s.min_score - s.credit_score, 0)::numeric /\n       GREATEST(ABS(COALESCE(s.min_score, 1)), 1) END) AS min_score_deficit,\n    (CASE WHEN s.max_score_ok THEN 0 ELSE\n       GREATEST(s.credit_score - s.max_score, 0)::numeric /\n       GREATEST(ABS(COALESCE(s.max_score, 1)), 1) END) AS max_score_deficit,\n    (CASE WHEN s.min_age_ok THEN 0 ELSE\n       GREATEST(s.min_age - s.age, 0)::numeric /\n       GREATEST(ABS(COALESCE(s.min_age, 1)), 1) END) AS min_age_deficit,\n    (CASE WHEN s.max_age_ok THEN 0 ELSE\n       GREATEST(s.age - s.max_age, 0)::numeric /\n       GREATEST(ABS(COALESCE(s.max_age, 1)), 1) END) AS max_age_deficit\n  FROM scored s\n),\neligible AS (\n  SELECT c.*, FALSE AS is_near_miss,\n    'all criteria satisfied'::text AS reason\n  FROM classified c\n  WHERE c.is_match\n),\nnear_misses AS (\n  SELECT c.*, TRUE AS is_near_miss,\n    CASE\n      WHEN NOT c.income_ok THEN 'failed criterion: minimum income'\n      WHEN NOT c.min_score_ok THEN 'failed criterion: minimum credit score'\n      WHEN NOT c.max_score_ok THEN 'failed criterion: maximum credit score'\n      WHEN NOT c.min_age_ok THEN 'failed criterion: minimum age'\n      WHEN NOT c.max_age_ok THEN 'failed criterion: maximum age'\n    END::text AS reason\n  FROM classified c\n  WHERE NOT c.is_match\n    AND c.employment_ok\n    AND c.failed_criteria = 1\n    AND (\n      (NOT c.income_ok AND c.income_deficit <= c.tolerance)\n      OR (NOT c.min_score_ok AND c.min_score_deficit <= c.tolerance)\n      OR (NOT c.max_score_ok AND c.max_score_deficit <= c.tolerance)\n      OR (NOT c.min_age_ok AND c.min_age_deficit <= c.tolerance)\n      OR (NOT c.max_age_ok AND c.max_age_deficit <= c.tolerance)\n    )\n),\nranked AS (\n  SELECT x.*,\n    ROW_NUMBER() OVER (\n      PARTITION BY x.user_id, x.is_near_miss\n      ORDER BY x.is_near_miss, x.normalized_margin DESC, x.product_id\n    ) AS product_rank\n  FROM (\n    SELECT * FROM eligible\n    UNION ALL\n    SELECT * FROM near_misses\n  ) x\n),\nlimited AS (\n  SELECT * FROM ranked\n  WHERE (NOT is_near_miss AND product_rank <= 3)\n     OR (is_near_miss AND product_rank <= 1)\n),\ninserted AS (\n  INSERT INTO matches (user_id, product_id, margin, reason, is_near_miss)\n  SELECT user_id, product_id, normalized_margin, reason, is_near_miss\n  FROM limited\n  ON CONFLICT (user_id, product_id) DO NOTHING\n  RETURNING user_id, product_id, is_near_miss\n),\nfunnel AS (\n  SELECT\n    (SELECT COUNT(*) FROM classified\n      WHERE income_ok AND min_score_ok AND max_score_ok\n        AND min_age_ok AND max_age_ok) AS range_join_count,\n    (SELECT COUNT(*) FROM inserted WHERE NOT is_near_miss) AS inserted_matches,\n    (SELECT COUNT(*) FROM inserted WHERE is_near_miss) AS inserted_near_misses\n)\nUPDATE batches b\nSET after_range_join = f.range_join_count,\n    matched_count = f.inserted_matches,\n    near_miss_count = f.inserted_near_misses,\n    status = 'matched'\nFROM funnel f\nWHERE b.batch_id = $1\nRETURNING b.batch_id, b.status, b.after_range_join,\n          b.matched_count, b.near_miss_count;",
+        "options": {
+          "queryReplacement": "={{ [$node['Normalize request'].json.batch_id, $node['Normalize request'].json.tolerance] }}"
+        }
+      },
+      "id": "node-wb-match-users",
+      "name": "Match batch users",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1080,
+        280
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": "workflow-c-notification-id",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "node-wb-invoke-wc",
+      "name": "Invoke Workflow C",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  batch_id: $node['Normalize request'].json.batch_id,\n  status: 'matched',\n  funnel: {\n    after_range_join: $node['Match batch users'].json.after_range_join,\n    matched_count: $node['Match batch users'].json.matched_count,\n    near_miss_count: $node['Match batch users'].json.near_miss_count\n  }\n}) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-wb-respond-ok",
+      "name": "Respond success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1520,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE batches\nSET status = 'failed'\nWHERE batch_id = $1::uuid\nRETURNING batch_id, status;",
+        "options": {
+          "queryReplacement": "={{ [$node['Normalize request'].json.batch_id] }}"
+        }
+      },
+      "id": "node-wb-mark-failed",
+      "name": "Mark batch failed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1180,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  batch_id: $node['Normalize request'].json.batch_id,\n  status: 'failed',\n  message: 'Workflow B matching failed'\n}) }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "node-wb-respond-failed",
+      "name": "Respond failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1400,
+        480
+      ]
+    }
+  ],
+  "connections": {
+    "Loan match webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize request": {
+      "main": [
+        [
+          {
+            "node": "Mark batch matching",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark batch matching": {
+      "main": [
+        [
+          {
+            "node": "Batch exists?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark batch failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch exists?": {
+      "main": [
+        [
+          {
+            "node": "Match batch users",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark batch failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match batch users": {
+      "main": [
+        [
+          {
+            "node": "Invoke Workflow C",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark batch failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invoke Workflow C": {
+      "main": [
+        [
+          {
+            "node": "Respond success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark batch failed": {
+      "main": [
+        [
+          {
+            "node": "Respond failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}

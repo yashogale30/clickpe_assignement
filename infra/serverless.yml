@@ -1,0 +1,92 @@
+service: loan-eligibility-engine
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: ${opt:region, 'ap-south-1'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    S3_UPLOAD_BUCKET: !Ref UploadsBucket
+    DB_HOST: ${env:DB_HOST}
+    DB_PORT: ${env:DB_PORT, '5432'}
+    DB_NAME: ${env:DB_NAME}
+    DB_USER: ${env:DB_USER}
+    DB_PASSWORD: ${env:DB_PASSWORD}
+    N8N_WEBHOOK_URL: ${env:N8N_WEBHOOK_URL}
+    WEBHOOK_SECRET: ${env:WEBHOOK_SECRET}
+    CORS_ALLOW_ORIGIN: ${env:CORS_ALLOW_ORIGIN, '*'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource: !Sub '${UploadsBucket.Arn}/uploads/*'
+        - Effect: Allow
+          Action: sqs:SendMessage
+          Resource: !GetAtt ProcessCsvDlq.Arn
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  pythonRequirements:
+    fileName: requirements.txt
+    dockerizePip: non-linux
+
+package:
+  patterns:
+    - '!./**'
+    # infra/lambdas is a repository-relative symlink to ../lambdas, so deployed
+    # modules stay at /var/task/lambdas while source code has one canonical home.
+    - 'lambdas/**'
+
+functions:
+  getUploadUrl:
+    handler: lambdas.get_upload_url.handler
+    events:
+      - http:
+          path: uploads/presigned-url
+          method: post
+          cors: true
+  getBatchStatus:
+    handler: lambdas.get_batch_status.handler
+    events:
+      - http:
+          path: batches/{batch_id}
+          method: get
+          cors: true
+  processCsv:
+    handler: lambdas.process_csv.handler
+    deadLetter:
+      targetArn: !GetAtt ProcessCsvDlq.Arn
+    events:
+      - s3:
+          bucket: UploadsBucket
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: uploads/
+            - suffix: .csv
+
+resources:
+  Resources:
+    UploadsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        CorsConfiguration:
+          CorsRules:
+            - AllowedMethods: [PUT]
+              AllowedOrigins: ['*']
+              AllowedHeaders: ['Content-Type']
+              MaxAge: 600
+    ProcessCsvDlq:
+      Type: AWS::SQS::Queue
+      Properties:
+        MessageRetentionPeriod: 1209600 # 14 days
+
+# RDS option: create an RDS PostgreSQL instance or use an existing endpoint, then
+# set DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD as deployment environment values.
+# The Lambda must also be attached to the RDS VPC subnets/security group; local Docker
+# Postgres uses the same variables with DB_HOST=localhost for scripts outside Lambda.

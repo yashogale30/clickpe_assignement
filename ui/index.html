@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loan Eligibility Upload</title>
+  <style>
+    :root {
+      --ink: #14213d;
+      --muted: #667085;
+      --line: #e5e9f0;
+      --surface: #ffffff;
+      --page: #f4f7fb;
+      --brand: #175cd3;
+      --brand-soft: #eff6ff;
+      --success: #027a48;
+      --success-soft: #ecfdf3;
+      --danger: #b42318;
+      --danger-soft: #fef3f2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 32px 16px;
+      background: radial-gradient(circle at top right, #e5efff, transparent 38%), var(--page);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .card {
+      width: min(680px, 100%);
+      padding: clamp(24px, 5vw, 40px);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--surface);
+      box-shadow: 0 24px 60px rgba(16, 24, 40, .12);
+    }
+    .eyebrow { color: var(--brand); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 8px 0; font-size: clamp(28px, 5vw, 38px); letter-spacing: -.04em; }
+    .intro { margin: 0 0 24px; color: var(--muted); line-height: 1.55; }
+    .drop-zone {
+      display: grid;
+      place-items: center;
+      min-height: 168px;
+      padding: 24px;
+      border: 2px dashed #b8c4d6;
+      border-radius: 14px;
+      background: #fbfcfe;
+      text-align: center;
+      cursor: pointer;
+      transition: .18s ease;
+    }
+    .drop-zone.dragging, .drop-zone:hover { border-color: var(--brand); background: var(--brand-soft); }
+    .drop-zone strong { display: block; margin-bottom: 5px; }
+    .drop-zone span { color: var(--muted); font-size: 14px; }
+    input[type=file] { display: none; }
+    .file-name { min-height: 22px; margin: 12px 0 0; color: var(--muted); font-size: 14px; }
+    .actions { display: flex; gap: 12px; align-items: center; margin-top: 20px; }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 9px;
+      padding: 12px 18px;
+      color: #fff;
+      background: var(--brand);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform .15s ease, opacity .15s ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    button:disabled { cursor: not-allowed; opacity: .55; transform: none; }
+    .upload-state { color: var(--muted); font-size: 14px; }
+    .progress { display: none; height: 8px; margin: 20px 0; overflow: hidden; border-radius: 999px; background: #e9eef5; }
+    .progress > div { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #175cd3, #53b1fd); transition: width .2s ease; }
+    .funnel { display: none; margin-top: 30px; border-top: 1px solid var(--line); padding-top: 24px; }
+    .funnel h2 { margin: 0 0 14px; font-size: 16px; }
+    .stage { display: grid; grid-template-columns: 22px 1fr auto; gap: 11px; align-items: center; padding: 12px 0; color: var(--muted); }
+    .stage + .stage { border-top: 1px solid #f0f2f5; }
+    .dot { width: 11px; height: 11px; border: 2px solid #c9d1dd; border-radius: 50%; }
+    .stage.active { color: var(--ink); }
+    .stage.active .dot { border-color: var(--success); background: var(--success); box-shadow: 0 0 0 5px var(--success-soft); }
+    .stage-name { font-weight: 650; }
+    .stage-detail { margin-top: 2px; color: var(--muted); font-size: 13px; }
+    .stage-count { font-variant-numeric: tabular-nums; font-weight: 750; }
+    .error { display: none; margin-top: 20px; padding: 14px; border-radius: 10px; color: var(--danger); background: var(--danger-soft); font-size: 14px; }
+    .mock { margin-left: auto; color: var(--muted); font-size: 12px; }
+    @media (max-width: 480px) { .actions { align-items: flex-start; flex-direction: column; } .mock { margin-left: 0; } }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="eyebrow">Loan Eligibility Engine</div>
+    <h1>Upload applicant CSV</h1>
+    <p class="intro">Upload a CSV and follow it from validation through matching and notifications.</p>
+
+    <label class="drop-zone" id="dropZone" for="fileInput">
+      <div>
+        <strong>Drop your CSV here</strong>
+        <span>or click to select a file</span>
+      </div>
+    </label>
+    <input id="fileInput" type="file" accept=".csv,text/csv">
+    <p class="file-name" id="fileName">No file selected</p>
+
+    <div class="actions">
+      <button id="uploadButton" type="button" disabled>Upload CSV</button>
+      <span class="upload-state" id="uploadState">Choose a CSV to begin.</span>
+      <span class="mock" id="modeLabel"></span>
+    </div>
+    <div class="progress" id="progress"><div id="progressBar"></div></div>
+
+    <section class="funnel" id="funnel" aria-live="polite">
+      <h2>Batch progress</h2>
+      <div class="stage" data-stage="uploaded"><span class="dot"></span><div><div class="stage-name">Uploaded</div><div class="stage-detail">Batch accepted</div></div><span class="stage-count" id="uploadedCount">—</span></div>
+      <div class="stage" data-stage="parsed"><span class="dot"></span><div><div class="stage-name">Parsed</div><div class="stage-detail" id="parsedDetail">Waiting for validation</div></div><span class="stage-count" id="parsedCount">—</span></div>
+      <div class="stage" data-stage="matched"><span class="dot"></span><div><div class="stage-name">Range matched</div><div class="stage-detail">Eligible user-product pairs</div></div><span class="stage-count" id="rangeCount">—</span></div>
+      <div class="stage" data-stage="matches-kept"><span class="dot"></span><div><div class="stage-name">Matches kept</div><div class="stage-detail" id="keptDetail">Top matches and near misses</div></div><span class="stage-count" id="keptCount">—</span></div>
+      <div class="stage" data-stage="emailed"><span class="dot"></span><div><div class="stage-name">Emailed</div><div class="stage-detail">Notifications accepted for delivery</div></div><span class="stage-count" id="emailedCount">—</span></div>
+    </section>
+    <div class="error" id="errorState" role="alert"></div>
+  </main>
+
+  <script>
+    /*
+      Change API_BASE_URL after deployment. Keep MOCK_MODE=true to record the
+      complete interface without AWS, S3, Lambda, Postgres, or n8n.
+    */
+    const CONFIG = {
+      API_BASE_URL: 'https://YOUR_API_ID.execute-api.ap-south-1.amazonaws.com/dev',
+      MOCK_MODE: true,
+      POLL_INTERVAL_MS: 2000,
+    };
+
+    const fileInput = document.getElementById('fileInput');
+    const dropZone = document.getElementById('dropZone');
+    const fileName = document.getElementById('fileName');
+    const uploadButton = document.getElementById('uploadButton');
+    const uploadState = document.getElementById('uploadState');
+    const progress = document.getElementById('progress');
+    const progressBar = document.getElementById('progressBar');
+    const funnel = document.getElementById('funnel');
+    const errorState = document.getElementById('errorState');
+    const modeLabel = document.getElementById('modeLabel');
+    let selectedFile = null;
+    let pollTimer = null;
+    let mockStep = 0;
+
+    modeLabel.textContent = CONFIG.MOCK_MODE ? 'Mock mode' : 'Live API mode';
+
+    function selectFile(file) {
+      if (!file) return;
+      if (!file.name.toLowerCase().endsWith('.csv')) {
+        showError('Please select a .csv file.');
+        return;
+      }
+      selectedFile = file;
+      fileName.textContent = `${file.name} · ${Math.ceil(file.size / 1024)} KB`;
+      uploadButton.disabled = false;
+      errorState.style.display = 'none';
+    }
+
+    fileInput.addEventListener('change', (event) => selectFile(event.target.files[0]));
+    ['dragenter', 'dragover'].forEach((name) => dropZone.addEventListener(name, (event) => {
+      event.preventDefault();
+      dropZone.classList.add('dragging');
+    }));
+    ['dragleave', 'drop'].forEach((name) => dropZone.addEventListener(name, (event) => {
+      event.preventDefault();
+      dropZone.classList.remove('dragging');
+    }));
+    dropZone.addEventListener('drop', (event) => selectFile(event.dataTransfer.files[0]));
+
+    function showError(message) {
+      clearInterval(pollTimer);
+      uploadButton.disabled = false;
+      uploadState.textContent = 'Upload failed.';
+      errorState.textContent = message;
+      errorState.style.display = 'block';
+    }
+
+    function setProgress(value) {
+      progress.style.display = 'block';
+      progressBar.style.width = `${Math.max(0, Math.min(100, value))}%`;
+    }
+
+    function statusRank(status) {
+      return { uploaded: 1, parsed: 2, matched: 4, notified: 5, failed: 0 }[status] || 0;
+    }
+
+    function renderStatus(batch) {
+      const rank = statusRank(batch.status);
+      funnel.style.display = 'block';
+      document.querySelectorAll('.stage').forEach((stage) => stage.classList.remove('active'));
+
+      if (rank >= 1) document.querySelector('[data-stage="uploaded"]').classList.add('active');
+      if (rank >= 2) document.querySelector('[data-stage="parsed"]').classList.add('active');
+      if (rank >= 4) {
+        document.querySelector('[data-stage="matched"]').classList.add('active');
+        document.querySelector('[data-stage="matches-kept"]').classList.add('active');
+      }
+      if (rank >= 5) document.querySelector('[data-stage="emailed"]').classList.add('active');
+
+      document.getElementById('uploadedCount').textContent = batch.total_users || 'Ready';
+      document.getElementById('parsedCount').textContent = batch.valid_users ?? '—';
+      document.getElementById('parsedDetail').textContent =
+        `${batch.valid_users || 0} valid · ${batch.rejected_users || 0} rejected`;
+      document.getElementById('rangeCount').textContent = batch.after_range_join ?? '—';
+      document.getElementById('keptCount').textContent = batch.matched_count ?? '—';
+      document.getElementById('keptDetail').textContent =
+        `${batch.matched_count || 0} matches · ${batch.near_miss_count || 0} near misses`;
+      document.getElementById('emailedCount').textContent = batch.emailed_count ?? '—';
+
+      if (batch.status === 'failed') {
+        showError('This batch could not be completed. Check Lambda and n8n logs, then retry the upload.');
+        return;
+      }
+
+      uploadState.textContent = batch.status === 'notified'
+        ? 'Completed — notifications have been sent.'
+        : `Processing: ${batch.status}`;
+
+      if (batch.status === 'notified') clearInterval(pollTimer);
+    }
+
+    async function getUploadUrl() {
+      const response = await fetch(`${CONFIG.API_BASE_URL}/uploads/presigned-url`, { method: 'POST' });
+      if (!response.ok) throw new Error('Could not create an upload URL.');
+      return response.json();
+    }
+
+    // XMLHttpRequest is used here because fetch does not expose browser upload progress.
+    function putFile(url, file) {
+      return new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open('PUT', url);
+        request.setRequestHeader('Content-Type', 'text/csv');
+        request.upload.onprogress = (event) => {
+          if (event.lengthComputable) setProgress((event.loaded / event.total) * 100);
+        };
+        request.onload = () => request.status >= 200 && request.status < 300
+          ? resolve()
+          : reject(new Error(`Upload failed with HTTP ${request.status}.`));
+        request.onerror = () => reject(new Error('Network error while uploading the CSV.'));
+        request.send(file);
+      });
+    }
+
+    async function pollBatch(batchId) {
+      try {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/batches/${encodeURIComponent(batchId)}`);
+        if (!response.ok) throw new Error('Could not retrieve batch status.');
+        renderStatus(await response.json());
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    function mockStatus() {
+      const states = [
+        { status: 'uploaded', total_users: 0 },
+        { status: 'parsed', total_users: 24, valid_users: 22, rejected_users: 2 },
+        { status: 'matched', total_users: 24, valid_users: 22, rejected_users: 2, after_range_join: 39, matched_count: 31, near_miss_count: 6 },
+        { status: 'notified', total_users: 24, valid_users: 22, rejected_users: 2, after_range_join: 39, matched_count: 31, near_miss_count: 6, emailed_count: 18 },
+      ];
+      return states[Math.min(mockStep++, states.length - 1)];
+    }
+
+    function startMockFlow() {
+      mockStep = 0;
+      setProgress(100);
+      renderStatus(mockStatus());
+      pollTimer = setInterval(() => renderStatus(mockStatus()), CONFIG.POLL_INTERVAL_MS);
+    }
+
+    uploadButton.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      clearInterval(pollTimer);
+      uploadButton.disabled = true;
+      errorState.style.display = 'none';
+      funnel.style.display = 'none';
+      setProgress(0);
+
+      if (CONFIG.MOCK_MODE) {
+        uploadState.textContent = 'Simulating upload…';
+        startMockFlow();
+        return;
+      }
+
+      try {
+        uploadState.textContent = 'Creating secure upload URL…';
+        const { batch_id: batchId, upload_url: uploadUrl } = await getUploadUrl();
+        uploadState.textContent = 'Uploading CSV…';
+        await putFile(uploadUrl, selectedFile);
+        uploadState.textContent = 'Upload complete. Waiting for processing…';
+        setProgress(100);
+        await pollBatch(batchId);
+        pollTimer = setInterval(() => pollBatch(batchId), CONFIG.POLL_INTERVAL_MS);
+      } catch (error) {
+        showError(error.message);
+      }
+    });
+  </script>
+</body>
+</html>

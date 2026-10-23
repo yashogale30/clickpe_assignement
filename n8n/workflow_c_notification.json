@@ -1,0 +1,242 @@
+{
+  "name": "Workflow C - User Notification (SES & Test Mode)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "node-wc-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n    u.user_id,\n    u.email,\n    json_agg(\n        json_build_object(\n            'product_name', p.product_name,\n            'source_site', p.source_site,\n            'interest_rate', p.interest_rate,\n            'margin', m.margin,\n            'is_near_miss', m.is_near_miss,\n            'reason', m.reason\n        ) ORDER BY m.is_near_miss ASC, m.margin DESC\n    ) AS matched_products\nFROM matches m\nJOIN users u ON m.user_id = u.user_id\nJOIN loan_products p ON m.product_id = p.product_id\nWHERE u.batch_id = $1::uuid\n  AND m.notified = FALSE\nGROUP BY u.user_id, u.email;",
+        "options": {
+          "queryReplacement": "={{ [$json.batch_id] }}"
+        }
+      },
+      "id": "node-wc-get-matches",
+      "name": "Get Unnotified Matches",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "node-wc-split-batches",
+      "name": "Split In Batches (SES Throttling)",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst userId = item.user_id;\nconst rawEmail = item.email;\nconst products = item.matched_products || [];\n\n// Read configuration from environment\nconst isTestMode = String($env.TEST_MODE || 'true').toLowerCase() === 'true';\nconst gmailUser = $env.GMAILUSER || 'atharva.test';\nconst fromEmail = $env.SES_FROM_EMAIL || 'notifications@example.com';\n\n// TEST_MODE rewrite: Never send to sample CSV emails in test mode!\n// Formats recipient as GMAILUSER+userid@gmail.com\nconst recipientEmail = isTestMode ? `${gmailUser}+${userId.replace(/[^a-zA-Z0-9]/g, '_')}@gmail.com` : rawEmail;\n\n// Separate regular matches and near misses\nconst qualified = products.filter(p => !p.is_near_miss);\nconst nearMisses = products.filter(p => p.is_near_miss);\n\n// Build HTML email\nlet html = `\n<div style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px; background-color: #ffffff;\">\n  <div style=\"background-color: #1e293b; padding: 16px; border-radius: 6px; text-align: center;\">\n    <h2 style=\"color: #ffffff; margin: 0; font-size: 20px;\">Personal Loan Pre-Qualification Results</h2>\n  </div>\n  <p style=\"color: #334155; font-size: 15px; margin-top: 20px;\">Dear Applicant (<strong>${userId}</strong>),</p>\n  <p style=\"color: #475569; font-size: 14px;\">Based on your recent financial profile submission, we evaluated your eligibility across our network of lending partners.</p>\n`;\n\nif (qualified.length > 0) {\n  html += `\n  <h3 style=\"color: #0f172a; border-bottom: 2px solid #3b82f6; padding-bottom: 6px; margin-top: 24px;\">Recommended Pre-Qualified Loan Products</h3>\n  <table style=\"width: 100%; border-collapse: collapse; margin-top: 10px;\">\n    <thead>\n      <tr style=\"background-color: #f1f5f9; text-align: left;\">\n        <th style=\"padding: 10px; border: 1px solid #cbd5e1; font-size: 13px;\">Lender / Product</th>\n        <th style=\"padding: 10px; border: 1px solid #cbd5e1; font-size: 13px;\">Interest Rate</th>\n        <th style=\"padding: 10px; border: 1px solid #cbd5e1; font-size: 13px;\">Status</th>\n      </tr>\n    </thead>\n    <tbody>\n  `;\n  for (const q of qualified) {\n    html += `\n      <tr>\n        <td style=\"padding: 10px; border: 1px solid #cbd5e1; font-size: 13px;\"><strong>${q.product_name}</strong><br><span style=\"color:#64748b; font-size:11px;\">${q.source_site}</span></td>\n        <td style=\"padding: 10px; border: 1px solid #cbd5e1; font-size: 13px; color: #16a34a; font-weight: bold;\">${q.interest_rate}% p.a.</td>\n        <td style=\"padding: 10px; border: 1px solid #cbd5e1; font-size: 13px;\"><span style=\"background-color: #dcfce7; color: #15803d; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;\">Eligible</span></td>\n      </tr>\n    `;\n  }\n  html += `</tbody></table>`;\n}\n\nif (nearMisses.length > 0) {\n  html += `\n  <div style=\"margin-top: 24px; padding: 14px; background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 6px;\">\n    <h4 style=\"color: #92400e; margin: 0 0 8px 0; font-size: 14px;\">Opportunities Within Reach (Near Misses)</h4>\n  `;\n  for (const nm of nearMisses) {\n    html += `\n      <p style=\"color: #78350f; font-size: 13px; margin: 4px 0;\">\n        \u2022 <strong>${nm.product_name}</strong> (${nm.interest_rate}% p.a.): ${nm.reason || 'Slightly below threshold'}.\n      </p>\n    `;\n  }\n  html += `</div>`;\n}\n\nhtml += `\n  <p style=\"color: #94a3b8; font-size: 11px; margin-top: 30px; border-top: 1px solid #e2e8f0; padding-top: 12px;\">\n    Disclaimer: Pre-qualification does not guarantee credit approval. Final approval, terms, and conditions are subject to verification and formal lender policies.\n  </p>\n  <p style=\"color: #94a3b8; font-size: 10px;\">\n    Routing Note: Delivery directed to ${recipientEmail} (${isTestMode ? 'TEST MODE ACTIVE' : 'LIVE PRODUCTION'}).\n  </p>\n</div>\n`;\n\n// Build Plain Text fallback\nlet text = `Personal Loan Pre-Qualification Results\n\n`;\ntext += `Dear Applicant (${userId}),\n\n`;\ntext += `Eligible Products:\n`;\nfor (const q of qualified) {\n  text += `- ${q.product_name} (${q.source_site}): ${q.interest_rate}% p.a.\n`;\n}\nif (nearMisses.length > 0) {\n  text += `\nNear Misses:\n`;\n  for (const nm of nearMisses) {\n    text += `- ${nm.product_name}: ${nm.reason}\n`;\n  }\n}\ntext += `\nDisclaimer: Eligibility subject to lender verification.\n`;\n\nreturn {\n  json: {\n    batch_id: $node['Get Unnotified Matches'].json.batch_id,\n    user_id: userId,\n    recipient_email: recipientEmail,\n    from_email: fromEmail,\n    subject: `Your Personal Loan Eligibility Matches (Ref: ${userId})`,\n    html_content: html,\n    text_content: text\n  }\n};"
+      },
+      "id": "node-wc-format-email",
+      "name": "Build Email & TEST_MODE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.from_email }}",
+        "toEmail": "={{ $json.recipient_email }}",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html_content }}",
+        "options": {
+          "text": "={{ $json.text_content }}"
+        }
+      },
+      "id": "node-wc-ses-send",
+      "name": "Send Email via AWS SES",
+      "type": "n8n-nodes-base.awsSes",
+      "typeVersion": 1,
+      "position": [
+        1060,
+        300
+      ],
+      "credentials": {
+        "aws": {
+          "id": "aws-ses-cred",
+          "name": "AWS SES Credentials"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE matches SET notified = TRUE WHERE user_id = $1 AND notified = FALSE;",
+        "options": {
+          "queryReplacement": "={{ [$json.user_id] }}"
+        }
+      },
+      "id": "node-wc-mark-notified",
+      "name": "Mark User Matches Notified",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 200,
+        "unit": "milliseconds"
+      },
+      "id": "node-wc-wait-rate-limit",
+      "name": "Wait Rate Limit (SES Sandbox)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE batches\nSET emailed_count = (\n    SELECT COUNT(DISTINCT user_id)\n    FROM matches m\n    JOIN users u ON m.user_id = u.user_id\n    WHERE u.batch_id = $1::uuid AND m.notified = TRUE\n),\nstatus = 'notified'\nWHERE batch_id = $1::uuid\nRETURNING batch_id, status, emailed_count;",
+        "options": {
+          "queryReplacement": "={{ [$node['Get Unnotified Matches'].json.batch_id] }}"
+        }
+      },
+      "id": "node-wc-update-batch",
+      "name": "Update Batch Status Notified",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1060,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Unnotified Matches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Unnotified Matches": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches (SES Throttling)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches (SES Throttling)": {
+      "main": [
+        [
+          {
+            "node": "Update Batch Status Notified",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Email & TEST_MODE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email & TEST_MODE": {
+      "main": [
+        [
+          {
+            "node": "Send Email via AWS SES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email via AWS SES": {
+      "main": [
+        [
+          {
+            "node": "Mark User Matches Notified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark User Matches Notified": {
+      "main": [
+        [
+          {
+            "node": "Wait Rate Limit (SES Sandbox)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Rate Limit (SES Sandbox)": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches (SES Throttling)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  }
+}

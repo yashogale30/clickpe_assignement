@@ -1,0 +1,10 @@
+.env
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+node_modules/
+postgres_data/
+n8n_data/
+.serverless/

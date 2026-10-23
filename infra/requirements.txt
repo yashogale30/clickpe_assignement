@@ -1,0 +1,3 @@
+psycopg[binary]>=3.2,<4
+# boto3 is supplied by the Lambda Python runtime; this line lets scripts/local_ingest.py run locally.
+boto3>=1.34,<2

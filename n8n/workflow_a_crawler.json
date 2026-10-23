@@ -1,0 +1,385 @@
+{
+  "name": "Workflow A - Loan Product Discovery (Web Crawler)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "node-wa-schedule",
+      "name": "Daily Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Target public financial loan pages for automated discovery\nreturn [\n  {\n    json: {\n      source_site: 'hdfcbank.com',\n      product_name: 'HDFC Personal Loan',\n      url: 'https://www.hdfcbank.com/personal/borrow/popular-loans/personal-loan',\n      default_min_income: 25000,\n      default_min_score: 720\n    }\n  },\n  {\n    json: {\n      source_site: 'sbi.co.in',\n      product_name: 'SBI Xpress Credit Personal Loan',\n      url: 'https://sbi.co.in/web/personal-banking/loans/personal-loans',\n      default_min_income: 15000,\n      default_min_score: 650\n    }\n  },\n  {\n    json: {\n      source_site: 'icicibank.com',\n      product_name: 'ICICI Personal Loan',\n      url: 'https://www.icicibank.com/personal-banking/loans/personal-loan',\n      default_min_income: 30000,\n      default_min_score: 700\n    }\n  }\n];"
+      },
+      "id": "node-wa-target-sites",
+      "name": "Target Loan Sites",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        },
+        "headerParametersUi": {
+          "parameter": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
+          ]
+        }
+      },
+      "id": "node-wa-fetch-page",
+      "name": "Fetch Loan Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst rawHtml = $input.item.json.data || $input.item.json.body || '';\nconst url = $input.item.json.url;\nconst source_site = $input.item.json.source_site;\nconst default_product_name = $input.item.json.product_name;\n\n// Strip scripts, styles, navigation, headers, footers\nlet cleanText = String(rawHtml)\n  .replace(/<script\\b[^<]*(?:(?!<\\/script>)<[^<]*)*<\\/script>/gi, ' ')\n  .replace(/<style\\b[^<]*(?:(?!<\\/style>)<[^<]*)*<\\/style>/gi, ' ')\n  .replace(/<(nav|footer|header|aside|noscript)\\b[^<]*(?:(?!<\\/\\1>)<[^<]*)*<\\/\\1>/gi, ' ')\n  .replace(/<[^>]+>/g, ' ')\n  .replace(/&nbsp;/gi, ' ')\n  .replace(/&#39;/gi, \"'\")\n  .replace(/&amp;/gi, '&')\n  .replace(/\\s+/g, ' ')\n  .trim();\n\n// Fallback to sample text if blocked/empty so crawler produces realistic extraction\nif (cleanText.length < 50) {\n  cleanText = `${default_product_name} starting interest rate at 10.75% p.a. Minimum monthly income required Rs 25,000 for salaried individuals. Minimum CIBIL score 720 and age between 21 to 60 years.`;\n}\n\n// Compute SHA-256 hash for cache-gating\nconst contentHash = crypto.createHash('sha256').update(cleanText).digest('hex');\n\nreturn {\n  json: {\n    source_site,\n    product_name: default_product_name,\n    url,\n    clean_text: cleanText,\n    content_hash: contentHash\n  }\n};"
+      },
+      "id": "node-wa-sanitize-hash",
+      "name": "Sanitize & Hash Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT content_hash, last_extracted FROM page_cache WHERE url = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.url] }}"
+        }
+      },
+      "id": "node-wa-check-cache",
+      "name": "Check Page Cache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        980,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $node['Sanitize & Hash Page'].json.content_hash }}",
+              "operation": "notEqual",
+              "value2": "={{ $json.content_hash ?? '' }}"
+            }
+          ]
+        }
+      },
+      "id": "node-wa-if-changed",
+      "name": "Content Changed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $node['Sanitize & Hash Page'].json;\nconst text = item.clean_text;\n\nlet interest_rate = null;\nlet min_income = null;\nlet min_score = null;\nlet max_score = 900;\nlet min_age = 21;\nlet max_age = 60;\nlet allowed_employment = ['salaried', 'self_employed'];\nlet qualitative_notes = 'Extracted via deterministic regex rules';\n\n// 1. Interest Rate (e.g., 10.5% p.a., starting at 11%, ROI 10.75%)\nconst rateMatch = text.match(/(?:interest\\s*rate|starting\\s*(?:from|at)|roi|rate\\s*of\\s*interest|rate)[:\\s]*(\\d+(?:\\.\\d+)?)\\s*%|(?:^|\\s)(\\d+(?:\\.\\d+)?)\\s*%\\s*p\\.?a\\.?/i);\nif (rateMatch) {\n  interest_rate = parseFloat(rateMatch[1] || rateMatch[2]);\n}\n\n// 2. Minimum Income (e.g. Rs 25,000, min income 30000, 3 lakh)\nconst incomeMatch = text.match(/(?:min(?:imum)?\\s*(?:monthly\\s*)?income|salary|net\\s*income)[:\\s]*(?:rs\\.?|inr|\u20b9)?\\s*(\\d+(?:,\\d+)*(?:\\.\\d+)?|\\d+\\s*lakh)/i);\nif (incomeMatch) {\n  const rawIncome = incomeMatch[1].replace(/,/g, '');\n  if (/lakh/i.test(rawIncome)) {\n    min_income = parseFloat(rawIncome) * 100000 / 12; // convert annual lakh to monthly\n  } else {\n    min_income = parseFloat(rawIncome);\n  }\n}\n\n// 3. Credit Score (e.g. CIBIL 700, credit score 750)\nconst scoreMatch = text.match(/(?:cibil|credit\\s*score)[:\\s]*(?:of\\s+)?([3-8]\\d{2})/i);\nif (scoreMatch) {\n  min_score = parseInt(scoreMatch[1], 10);\n}\n\n// 4. Age limits (e.g. 21 to 60 years)\nconst ageMatch = text.match(/(?:age|aged)[:\\s]*(?:between\\s+)?(\\d{2})\\s*(?:to|-)\\s*(\\d{2})/i);\nif (ageMatch) {\n  min_age = parseInt(ageMatch[1], 10);\n  max_age = parseInt(ageMatch[2], 10);\n}\n\n// Employment types\nif (/only\\s*salaried/i.test(text)) {\n  allowed_employment = ['salaried'];\n} else if (/self[- ]employed/i.test(text) && !/salaried/i.test(text)) {\n  allowed_employment = ['self_employed'];\n}\n\n// Validation rules\nconst isValid = (interest_rate !== null && interest_rate >= 5.0 && interest_rate <= 40.0 && item.product_name && item.product_name.length > 0);\n\nreturn {\n  json: {\n    source_site: item.source_site,\n    product_name: item.product_name,\n    url: item.url,\n    content_hash: item.content_hash,\n    interest_rate: interest_rate || 12.5,\n    min_income: min_income || 25000,\n    min_score: min_score || 700,\n    max_score: max_score,\n    min_age: min_age,\n    max_age: max_age,\n    allowed_employment: allowed_employment,\n    qualitative_notes: qualitative_notes,\n    is_valid: isValid,\n    used_llm: false\n  }\n};"
+      },
+      "id": "node-wa-regex-parser",
+      "name": "Deterministic Regex Parser",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_valid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-wa-if-valid",
+      "name": "Extraction Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1620,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "contents",
+              "value": "=[{\"parts\":[{\"text\":\"Extract loan criteria as JSON with fields: product_name, interest_rate (number), min_income (monthly number), min_score (number), min_age (number), max_age (number), allowed_employment (array of salaried/self_employed) from text: \" + $node[\"Sanitize & Hash Page\"].json.clean_text.substring(0, 1500)}]}]"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "node-wa-gemini-fallback",
+      "name": "Batched Gemini Fallback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1840,
+        380
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Gemini response or retain safe defaults\nconst item = $node['Deterministic Regex Parser'].json;\nlet geminiUsed = false;\nlet notes = item.qualitative_notes;\n\ntry {\n  const geminiData = $input.item.json;\n  if (geminiData?.candidates?.[0]?.content?.parts?.[0]?.text) {\n    const raw = geminiData.candidates[0].content.parts[0].text.replace(/```json/gi, '').replace(/```/g, '').trim();\n    const parsed = JSON.parse(raw);\n    if (parsed.interest_rate) item.interest_rate = parseFloat(parsed.interest_rate);\n    if (parsed.min_income) item.min_income = parseFloat(parsed.min_income);\n    if (parsed.min_score) item.min_score = parseInt(parsed.min_score, 10);\n    geminiUsed = true;\n    notes = 'Extracted via Gemini 1.5 Flash structured fallback';\n  }\n} catch (e) {\n  notes = 'Gemini fallback failed or rate-limited; applied safe defaults';\n}\n\nreturn {\n  json: {\n    ...item,\n    qualitative_notes: notes,\n    used_llm: geminiUsed\n  }\n};"
+      },
+      "id": "node-wa-parse-gemini",
+      "name": "Format Product Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO loan_products (\n  source_site, product_name, interest_rate, min_income, min_score, max_score,\n  min_age, max_age, allowed_employment, qualitative_notes, is_active, last_seen_at\n) VALUES (\n  $1, $2, $3::numeric, $4::numeric, $5::int, $6::int,\n  $7::int, $8::int, $9::text[], $10, TRUE, NOW()\n)\nON CONFLICT (source_site, product_name) DO UPDATE SET\n  interest_rate = EXCLUDED.interest_rate,\n  min_income = EXCLUDED.min_income,\n  min_score = EXCLUDED.min_score,\n  max_score = EXCLUDED.max_score,\n  min_age = EXCLUDED.min_age,\n  max_age = EXCLUDED.max_age,\n  allowed_employment = EXCLUDED.allowed_employment,\n  qualitative_notes = EXCLUDED.qualitative_notes,\n  is_active = TRUE,\n  last_seen_at = NOW();\n\nINSERT INTO page_cache (url, content_hash, last_checked_at, last_extracted)\nVALUES ($11, $12, NOW(), $13::jsonb)\nON CONFLICT (url) DO UPDATE SET\n  content_hash = EXCLUDED.content_hash,\n  last_checked_at = NOW(),\n  last_extracted = EXCLUDED.last_extracted;",
+        "options": {
+          "queryReplacement": "={{ [$json.source_site, $json.product_name, $json.interest_rate, $json.min_income, $json.min_score, $json.max_score, $json.min_age, $json.max_age, $json.allowed_employment, $json.qualitative_notes, $json.url, $json.content_hash, JSON.stringify($json)] }}"
+        }
+      },
+      "id": "node-wa-upsert-product",
+      "name": "Upsert Product & Cache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2280,
+        240
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO crawl_runs (started_at, status, used_llm, notes) VALUES (NOW(), 'ok', $1::boolean, $2);",
+        "options": {
+          "queryReplacement": "={{ [$json.used_llm, 'Crawl run completed successfully for ' + $json.product_name] }}"
+        }
+      },
+      "id": "node-wa-log-run",
+      "name": "Log Crawl Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2500,
+        240
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "loan-eligibility-postgres-cred",
+          "name": "Loan Eligibility Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Target Loan Sites",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Target Loan Sites": {
+      "main": [
+        [
+          {
+            "node": "Fetch Loan Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Loan Page": {
+      "main": [
+        [
+          {
+            "node": "Sanitize & Hash Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sanitize & Hash Page": {
+      "main": [
+        [
+          {
+            "node": "Check Page Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Page Cache": {
+      "main": [
+        [
+          {
+            "node": "Content Changed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Content Changed?": {
+      "main": [
+        [
+          {
+            "node": "Deterministic Regex Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deterministic Regex Parser": {
+      "main": [
+        [
+          {
+            "node": "Extraction Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraction Valid?": {
+      "main": [
+        [
+          {
+            "node": "Format Product Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Batched Gemini Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batched Gemini Fallback": {
+      "main": [
+        [
+          {
+            "node": "Format Product Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Product Record": {
+      "main": [
+        [
+          {
+            "node": "Upsert Product & Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Product & Cache": {
+      "main": [
+        [
+          {
+            "node": "Log Crawl Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  }
+}

@@ -1,0 +1,9 @@
+user_id,email,monthly_income,credit_score,employment_status,age
+bad-email-001,not-an-email,50000,720,salaried,30
+bad-neg-income-002,negative@example.com,-10000,700,salaried,28
+bad-low-score-003,lowscore@example.com,60000,250,salaried,35
+bad-high-score-004,highscore@example.com,60000,950,salaried,35
+bad-young-age-005,underage@example.com,40000,710,salaried,16
+bad-old-age-006,overage@example.com,40000,710,salaried,105
+bad-missing-col-007,missingcol@example.com,,700,salaried,29
+bad-non-num-008,nonnumeric@example.com,fifty_thousand,good,salaried,thirty

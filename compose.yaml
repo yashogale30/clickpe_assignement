@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: loan-eligibility-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-loan_eligibility}
+      POSTGRES_USER: ${POSTGRES_USER:-loan_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-loan_app_password}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Postgres runs this only when the data volume is first initialized.
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./db/seed_products.sql:/docker-entrypoint-initdb.d/02-seed-products.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - loan_network
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: loan-eligibility-n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      # n8n's own persistence database.
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-loan_app}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-loan_app_password}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+      # Available to n8n workflow expressions as $env.LOAN_DB_*.
+      LOAN_DB_HOST: postgres
+      LOAN_DB_PORT: 5432
+      LOAN_DB_NAME: ${POSTGRES_DB:-loan_eligibility}
+      LOAN_DB_USER: ${POSTGRES_USER:-loan_app}
+      LOAN_DB_PASSWORD: ${POSTGRES_PASSWORD:-loan_app_password}
+      # Workflow variables accessed via $env
+      TEST_MODE: ${TEST_MODE:-true}
+      GMAILUSER: ${GMAILUSER:-your.gmail.username}
+      SES_FROM_EMAIL: ${SES_FROM_EMAIL:-verified-sender@example.com}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - loan_network
+
+volumes:
+  postgres_data:
+  n8n_data:
+
+networks:
+  loan_network:
+    driver: bridge
