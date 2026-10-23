@@ -233,23 +233,3 @@ Gemini failure produces a `degraded` crawl run and keeps existing products. If a
 | SES | Sandbox starts at 200 recipients/day and one recipient/second; quotas are regional. |
 | RDS | Begin small; add pooling, VPC tuning, and monitoring before production scale. |
 
-## Seven-minute demo script
-
-| Time | Show | Say |
-|---:|---|---|
-| 0:00–0:30 | Mermaid architecture diagram | “A CSV goes directly from the browser to S3. Lambda validates it into Postgres, n8n matches applicants, and SES sends results. Gemini is only a crawler fallback.” |
-| 0:30–0:55 | `docker compose ps`, then n8n | “Postgres and n8n run locally. The same DB environment contract supports RDS when deployed.” |
-| 0:55–1:20 | `db/init.sql`, then seeded products | “The schema tracks batches, rejected rows, products, matches, cache, and runs. Seeds let the demo work when crawling is degraded.” |
-| 1:20–1:45 | UI in mock mode | “The UI supports drag-and-drop upload and a live funnel. Mock mode records the whole visual flow without AWS.” |
-| 1:45–2:15 | Live UI upload | “The UI requests a ten-minute presigned URL, then uploads directly to S3. Application credentials and file bytes do not pass through the page.” |
-| 2:15–2:45 | `get_upload_url.py` and `process_csv.py` | “The S3 event streams CSV rows, validates them, writes valid chunks with COPY to staging, upserts users, and stores rejected rows with reasons.” |
-| 2:45–3:10 | Parsed UI stage and `batches` query | “Batch counters make the funnel durable. Ingestion posts only a batch ID and Bearer secret to Workflow B.” |
-| 3:10–3:40 | Workflow A nodes | “Workflow A hashes pages before extraction, uses regex first, and makes at most one batched Gemini request only for failures.” |
-| 3:40–4:10 | Workflow B webhook and SQL node | “Workflow B range-joins users to products, calculates margin, identifies one small near miss, ranks matches, and keeps the best three.” |
-| 4:10–4:35 | Matching SQL / `matches` table | “This is the optimization treasure hunt: no LLM per pair. SQL is deterministic, auditable, inexpensive, and scales to thousands of users.” |
-| 4:35–5:05 | Range matched and Matches kept UI stages | “The UI polls batch status every two seconds and displays both broad range matches and the smaller ranked set.” |
-| 5:05–5:35 | Workflow C nodes | “Workflow C aggregates matches per user, sends one recipient at a time, waits 1.1 seconds for SES limits, and updates notification state only on success.” |
-| 5:35–6:00 | Workflow C Code node | “It builds both HTML and plain-text email deterministically, separates close calls from passes, and includes a lender-verification disclaimer.” |
-| 6:00–6:25 | TEST_MODE and SES configuration | “Test mode rewrites every recipient to my Gmail alias; CSV addresses are never used. Successful sends alone set notified true.” |
-| 6:25–6:45 | Emailed stage and batch query | “The batch now has a notified status and final emailed-recipient count.” |
-| 6:45–7:00 | Gmail inbox and opened email | “The email lists candidate products first, near misses separately, and makes clear that final approval belongs to the lender.” |
